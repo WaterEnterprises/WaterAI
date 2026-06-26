@@ -1,0 +1,6 @@
+[Details]
+  Icon = "resources/logo-only.png"
+  Name = "Water"
+  ID = "ai.water.app"
+  Version = "0.2.0"
+  Build = 1

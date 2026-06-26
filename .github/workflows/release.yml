@@ -1,0 +1,280 @@
+# ==============================================================================
+# WATER AI — CI + RELEASE PIPELINE
+# ==============================================================================
+#
+# Runs all tests, then builds self-contained binaries on each platform runner
+# and collects them into a single GitHub Release using the VERSION from the
+# Makefile.
+#
+# Linux:   .run self-extracting installers with bundled Mesa software renderer fallback
+# macOS:   .dmg disk images via fyne package + hdiutil
+# Windows: .exe with embedded manifest/icon via fyne package
+#
+# ==============================================================================
+
+name: CI & Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g., v1.0.0)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.26.0'
+
+# ==============================================================================
+# JOB 1 — Run all tests
+# ==============================================================================
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc g++ pkg-config \
+            libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libx11-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libxxf86vm-dev \
+            libasound2-dev
+
+      - name: Download Go dependencies
+        run: |
+          go mod download
+          go mod tidy
+
+      - name: Run all tests
+        run: make test
+
+  # ==============================================================================
+  # JOB 2 — Build self-contained binaries on each platform
+  # ==============================================================================
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    strategy:
+      matrix:
+        include:
+          # --- Linux: .run self-extracting installers with bundled Mesa fallback ---
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+            artifact: Water-linux-amd64.run
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+            artifact: Water-linux-arm64.run
+          # --- macOS: .dmg disk images ---
+          - goos: darwin
+            goarch: amd64
+            runner: macos-latest
+            artifact: Water-darwin-amd64.dmg
+          - goos: darwin
+            goarch: arm64
+            runner: macos-latest
+            artifact: Water-darwin-arm64.dmg
+          # --- Windows: .exe with embedded manifest/icon ---
+          - goos: windows
+            goarch: amd64
+            runner: windows-latest
+            artifact: Water-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            runner: windows-latest
+            cross_compile: true
+            artifact: Water-windows-arm64.exe
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # --- Linux: install static linking + Mesa software renderer dependencies ---
+      - name: Install Linux dependencies (static + Mesa swrast + makeself)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc g++ pkg-config \
+            libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libx11-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libxxf86vm-dev \
+            libasound2-dev \
+            libgl-dev libx11-xcb-dev libxkbcommon-dev \
+            libwayland-dev libvulkan-dev \
+            libgl1-mesa-dri mesa-utils \
+            libgl1 libglx-mesa0 libglvnd0 libegl1 libgles2 \
+            libosmesa6 \
+            makeself
+          # Verify Mesa libraries are available for bundling
+          echo "=== Mesa library check ==="
+          for lib in libGL.so.1 libGLX.so.0 libGLdispatch.so.0 libEGL.so.1 libGLESv2.so.2; do
+            find /usr/lib /usr/lib64 /usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "unknown") \
+              -name "${lib}*" -type f -o -name "${lib}*" -type l 2>/dev/null | head -3
+          done
+
+      # --- macOS: install fyne CLI for .app bundling ---
+      - name: Install fyne CLI (macOS)
+        if: runner.os == 'macOS'
+        run: go install fyne.io/tools/cmd/fyne@latest
+
+      # --- Windows amd64: install MSYS2 + fyne CLI ---
+      - name: Install Windows amd64 dependencies
+        if: runner.os == 'Windows' && matrix.goarch == 'amd64'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc pkg-config
+
+      # --- Windows arm64: install llvm-mingw cross-compiler ---
+      - name: Install Windows arm64 cross-compiler (llvm-mingw)
+        if: runner.os == 'Windows' && matrix.goarch == 'arm64'
+        shell: bash
+        run: |
+          LLVM_MINGW_VER="20250114"
+          LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_VER}/llvm-mingw-${LLVM_MINGW_VER}-ucrt-x86_64.zip"
+          echo "Downloading llvm-mingw from ${LLVM_MINGW_URL}..."
+          curl -sSL -o llvm-mingw.zip "${LLVM_MINGW_URL}"
+          7z x llvm-mingw.zip -o"C:/llvm-mingw" -y
+          # The extracted folder has a versioned name; find it
+          LLVM_DIR=$(find "C:/llvm-mingw" -maxdepth 1 -type d -name "llvm-mingw-*" | head -1)
+          echo "llvm-mingw extracted to: ${LLVM_DIR}"
+          echo "${LLVM_DIR}/bin" >> $GITHUB_PATH
+          echo "LLVM_MINGW_DIR=${LLVM_DIR}" >> $GITHUB_ENV
+
+      - name: Install fyne CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: go install fyne.io/tools/cmd/fyne@latest
+
+      # --- Build release binary/bundle ---
+      - name: Build release binary
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          TARGET_OS: ${{ matrix.goos }}
+          TARGET_ARCH: ${{ matrix.goarch }}
+        run: |
+          # For Windows arm64 cross-compilation, set CC to llvm-mingw aarch64 target
+          if [ "${{ matrix.goos }}" = "windows" ] && [ "${{ matrix.goarch }}" = "arm64" ]; then
+            export CC=aarch64-w64-mingw32-gcc
+            export CXX=aarch64-w64-mingw32-g++
+            export CGO_LDFLAGS="-static -lpthread -lm"
+            echo "Cross-compiling windows/arm64 with CC=${CC}"
+          fi
+          # For Windows amd64, ensure MSYS2 MINGW64 is on PATH
+          if [ "${{ matrix.goos }}" = "windows" ] && [ "${{ matrix.goarch }}" = "amd64" ]; then
+            export PATH="/c/msys64/mingw64/bin:${PATH}"
+          fi
+          # Verify icon file exists before building
+          echo "=== Icon file check ==="
+          ls -la resources/logo-only.png
+          make release-local
+
+      - name: List build outputs
+        if: always()
+        shell: bash
+        run: |
+          echo "=== dist/ directory contents ==="
+          ls -la dist/ 2>/dev/null || echo "dist/ directory not found"
+          echo "=== Searching for Water* files ==="
+          find . -maxdepth 3 -name "Water*" -type f 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/Water-*
+          retention-days: 1
+
+  # ==============================================================================
+  # JOB 3 — Collect all artifacts and create a single GitHub Release
+  # ==============================================================================
+  release:
+    name: Create Release
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract VERSION from Makefile
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=$(grep -E '^VERSION\s*(\?=|:=|=)' Makefile | head -1 | sed 's/.*[?:]\?=\s*//' | xargs)
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Resolved version: $VERSION"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate Checksums
+        run: |
+          cd dist
+          sha256sum Water-* > checksums.sha256
+          echo "=== Artifacts ==="
+          ls -la
+          echo "=== Checksums ==="
+          cat checksums.sha256
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Delete existing release/tag if it exists (idempotent re-release)
+          gh release delete "$VERSION" --yes 2>/dev/null || true
+          git tag -d "$VERSION" 2>/dev/null || true
+          git push origin ":refs/tags/$VERSION" 2>/dev/null || true
+
+          gh release create "$VERSION" \
+            --title "Water AI $VERSION" \
+            --generate-notes \
+            --latest \
+            dist/*

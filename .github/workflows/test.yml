@@ -1,0 +1,69 @@
+# ==============================================================================
+# WATER AI — TEST PIPELINE
+# ==============================================================================
+#
+# Runs lint, vet, and tests with race detection and coverage.
+#
+# ==============================================================================
+
+name: Test
+
+on:
+  push:
+    branches: [master, main, development, gui]
+    paths-ignore: ['**.md', 'docs/**', '.gitignore', 'LICENSE']
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  security-events: write
+
+env:
+  GO_VERSION: '1.26.0'
+
+jobs:
+  test:
+    name: Test & Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install Fyne system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libx11-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libxxf86vm-dev \
+            libasound2-dev pkg-config gcc g++
+
+      - name: Lint & Vet
+        run: |
+          make mocks
+          make fmt
+          make vet
+          make lint
+
+      - name: Test (race + coverage)
+        run: make test
+        continue-on-error: false
+
+      - name: Coverage Report
+        run: make test-coverage
+        continue-on-error: true
+
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/coverage.out
+          fail_ci_if_error: false

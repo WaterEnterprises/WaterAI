@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Water
+Comment=Water AI Assistant
+Exec=@BIN_DIR@/Water %u
+Icon=@ICON_DIR@/water.png
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true
+StartupWMClass=Water
+Keywords=AI;Assistant;Chat;
