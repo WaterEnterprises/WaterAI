@@ -1,0 +1,91 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - master
+      - main
+      - development
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: write # REQUIRED: to create tags and releases
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # ========================================================================
+      # 1. SETUP & DEPENDENCIES
+      # ========================================================================
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23' # Changed from 1.25 (doesn't exist yet) to stable
+          cache: true
+
+      - name: Setup Node.js (for Frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'yarn'
+          cache-dependency-path: frontend/yarn.lock
+
+      # ========================================================================
+      # 2. VERSION CHECK (FROM MAKEFILE)
+      # ========================================================================
+      - name: Extract Version from Makefile
+        id: get_version
+        run: |
+          VER=$(grep "^VERSION" Makefile | head -n 1 | sed 's/VERSION.*=[[:space:]]*//g')
+          if [ -z "$VER" ]; then
+            echo "Error: Could not extract VERSION from Makefile"
+            exit 1
+          fi
+          echo "Found version: $VER"
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      - name: Check if Tag Exists
+        id: check_tag
+        uses: mukunku/tag-exists-action@v1.6.0
+        with: 
+          tag: ${{ steps.get_version.outputs.version }}
+
+      # ========================================================================
+      # 3. BUILD OPTIMIZED BINARIES
+      # ========================================================================
+      - name: Build Optimized Binaries
+        run: |
+          make clean
+          make release
+        # 'make clean' ensures previous artifacts don't block fresh embedding
+
+      # ========================================================================
+      # 4. PUBLISH RELEASE
+      # ========================================================================
+      - name: Create Release
+        if: |
+          (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && 
+          steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          name: "Water AI ${{ steps.get_version.outputs.version }}"
+          draft: false
+          prerelease: false
+          files: dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
